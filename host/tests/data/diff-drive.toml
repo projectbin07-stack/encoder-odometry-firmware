@@ -1,0 +1,12 @@
+# ILLUSTRATIVE EXAMPLE - made-up numbers, not a measurement of a real robot.
+# A 4WD skid-steer base. `drive` is an odobridge-only key.
+name = "example-skid-steer"
+description = "Illustrative differential/skid-steer base"
+drive = "differential"
+
+wheel_radius = 0.0325     # m
+half_length = 0.080       # m (unused by differential kinematics)
+half_width = 0.095        # m, half the track
+ticks_per_rev = 44        # 11 PPR hall encoder x 4
+gear_ratio = 90.0
+max_wheel_speed = 15.0    # rad/s

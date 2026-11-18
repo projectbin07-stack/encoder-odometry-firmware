@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling>=1.24,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "odobridge"
+dynamic = ["version"]
+description = "Host bridge for encoder-odometry-firmware: COBS/CRC-16 protocol, CLI and a firmware model"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "Navaneeth KG" }]
+dependencies = [
+    "pyserial>=3.5,<4",
+    "tomli>=2.0,<3; python_version < '3.11'",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<10",
+    "pytest-cov>=5,<8",
+    "ruff>=0.6,<1",
+    "mypy>=1.10,<2",
+]
+
+[project.scripts]
+odobridge = "odobridge.cli:main"
+
+[tool.hatch.version]
+path = "src/odobridge/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/odobridge"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "C4", "PT", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["src/odobridge", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["serial", "serial.*", "tomli"]
+ignore_missing_imports = true
