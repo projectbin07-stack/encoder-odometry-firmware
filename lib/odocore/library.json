@@ -1,0 +1,8 @@
+{
+  "name": "odocore",
+  "version": "0.1.0",
+  "description": "Hardware-independent wheel-odometry core: quadrature decoding, velocity estimation, PI(D) velocity control, mecanum/differential kinematics, SE(2) odometry and a COBS/CRC-16 serial protocol.",
+  "license": "MIT",
+  "frameworks": "*",
+  "platforms": "*"
+}
