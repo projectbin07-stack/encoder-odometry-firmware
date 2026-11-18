@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PLATFORMIO_VERSION: "6.1.18"
+
+jobs:
+  native-tests:
+    name: Native unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Cache PlatformIO
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-native-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-native-${{ runner.os }}-
+      - name: Install PlatformIO
+        run: pip install "platformio==${PLATFORMIO_VERSION}"
+      - name: Run unit tests
+        run: pio test -e native -v
+
+  firmware:
+    name: Build ${{ matrix.environment }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [esp32dev, esp32-s3-devkitc-1, esp32dev_drv_isr, nucleo_f401re]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Cache PlatformIO
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ matrix.environment }}-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-${{ matrix.environment }}-${{ runner.os }}-
+      - name: Install PlatformIO
+        run: pip install "platformio==${PLATFORMIO_VERSION}"
+      - name: Build firmware
+        run: pio run -e ${{ matrix.environment }}
+      - name: Report firmware size
+        run: pio run -e ${{ matrix.environment }} -t size
+
+  host:
+    name: Host tool (${{ matrix.os }}, ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.13"]
+    defaults:
+      run:
+        working-directory: host
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: host/pyproject.toml
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: Type check
+        run: mypy
+      - name: Test
+        run: pytest --cov=odobridge --cov-report=term-missing
+      - name: Shared protocol vectors are up to date
+        run: odobridge vectors
+      - name: CLI smoke test against the firmware model
+        run: odobridge simulate --vx 0.3 --wz 0.5 --duration 3
