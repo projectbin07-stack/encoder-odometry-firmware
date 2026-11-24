@@ -18,6 +18,48 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field, fields
 from typing import ClassVar
 
+__all__ = [
+    "CRC_SIZE",
+    "DIAG_HARDWARE_COUNTERS",
+    "DIAG_SATURATED",
+    "DIAG_WATCHDOG_EXPIRED",
+    "HEADER_SIZE",
+    "MAX_BODY_SIZE",
+    "MAX_FRAME_SIZE",
+    "MAX_PACKET_SIZE",
+    "MESSAGE_TYPES",
+    "PARAM_OK",
+    "PARAM_OUT_OF_RANGE",
+    "PARAM_READ_ONLY",
+    "PARAM_STATUS_NAMES",
+    "PARAM_UNKNOWN_ID",
+    "PROTOCOL_VERSION",
+    "Diagnostics",
+    "FrameDecoder",
+    "Message",
+    "MessageType",
+    "Odometry",
+    "Packet",
+    "ParamGet",
+    "ParamSet",
+    "ParamValue",
+    "ProtocolError",
+    "SetPose",
+    "VelocityCommand",
+    "WheelState",
+    "body_size",
+    "cobs_decode",
+    "cobs_encode",
+    "crc16_ccitt",
+    "decode_frame",
+    "decode_packet",
+    "duty_to_wire",
+    "encode_frame",
+    "encode_packet",
+    "message_from_dict",
+    "message_to_dict",
+]
+
 PROTOCOL_VERSION = 1
 HEADER_SIZE = 4
 CRC_SIZE = 2
@@ -449,7 +491,17 @@ class FrameDecoder:
 
 
 def duty_to_wire(duty: float) -> int:
-    """Duty cycle in [-1, 1] -> int16 x 10000, rounded half away from zero."""
+    """Convert a duty cycle to the WHEEL_STATE wire value (int16, duty x 10000).
+
+    Mirrors ``odocore::duty_to_wire``. ``duty`` is a signed fraction of full
+    PWM, positive = drive the wheel's side forward. The value is multiplied by
+    10000, clamped to [-10000, 10000] and rounded half away from zero (like
+    ``std::lround``), so ``1.0 -> 10000``, ``-0.5 -> -5000``, ``0.00005 -> 1``
+    and ``2.0 -> 10000``. NaN and +-infinity map to 0.
+
+    The firmware multiplies in float32, this function in double; the two
+    agree to float rounding (see the README's known limitations).
+    """
     if duty != duty or duty in (float("inf"), float("-inf")):
         return 0
     scaled = max(-10000.0, min(10000.0, duty * 10000.0))
