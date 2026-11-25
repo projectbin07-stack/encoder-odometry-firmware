@@ -231,6 +231,14 @@ The tiny error says only that the odometry maths is consistent with the
 simulated plant. The model has no wheel slip, backlash or encoder noise, so
 it says nothing about real-world odometry accuracy.
 
+### Using the firmware model from Python
+
+`DriveController`, `SimulatedRobot` and friends are a supported, documented
+API for using the model as a test oracle in other projects (install from a
+tag, import, step it with your own clock). See
+[docs/host-api.md](docs/host-api.md) for the import paths, the wheel order,
+sign, unit and clock conventions, and a runnable example.
+
 ### With a robot
 
 ```sh
