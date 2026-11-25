@@ -10,6 +10,25 @@ float32, so results agree with the firmware's to float rounding, not
 bit-for-bit. The plant is a deliberately simple model, not a measurement of
 any real motor: it is good for exercising the protocol, the CLI and the
 control logic, not for predicting how a real robot will behave.
+
+Public API (listed in ``__all__`` and described in ``docs/host-api.md``):
+:class:`DriveConfig`, :class:`DriveController`, :class:`SimulatedRobot`,
+:class:`SimulatedFirmware`, :class:`MotorModel`, :class:`EncoderSnapshot`,
+:class:`WheelStatus`, :class:`Pose2D`, :class:`PidConfig`,
+:class:`VelocityConfig`, :class:`CommandWatchdog` and :func:`wrap_angle`.
+The other names in this module are implementation details of the mirror and
+may change without notice.
+
+Conventions shared by the whole module (and by ``lib/odocore``):
+
+* Wheel arrays are always four values in FL, FR, RL, RR order.
+* A positive wheel count, speed, target or duty drives that wheel's side of
+  the robot forward. Body twists follow REP-103 (x forward, y left, yaw
+  counter-clockwise).
+* Times are microseconds on a 32-bit clock that wraps modulo 2**32, like
+  Arduino ``micros()``; all differences are taken wrap-safely.
+* Encoder counts are 4x quadrature counts per wheel, carried as int32 and
+  wrapping modulo 2**32.
 """
 
 from __future__ import annotations
@@ -42,6 +61,21 @@ from .protocol import (
     encode_frame,
 )
 
+__all__ = [
+    "CommandWatchdog",
+    "DriveConfig",
+    "DriveController",
+    "EncoderSnapshot",
+    "MotorModel",
+    "PidConfig",
+    "Pose2D",
+    "SimulatedFirmware",
+    "SimulatedRobot",
+    "VelocityConfig",
+    "WheelStatus",
+    "wrap_angle",
+]
+
 _U32 = 0xFFFFFFFF
 
 
@@ -62,6 +96,18 @@ def to_int32(value: int) -> int:
 
 @dataclass(frozen=True)
 class EncoderSnapshot:
+    """State of one encoder at a sampling instant (``odocore::EncoderSnapshot``).
+
+    Attributes:
+        count: Accumulated 4x count, int32 (wraps modulo 2**32). Increases
+            when the wheel drives its side forward.
+        last_edge_us: Time of the most recent counted edge, us (32-bit clock).
+        illegal_transitions: Missed-edge events since start (reported only).
+        edge_time_exact: True if ``last_edge_us`` is a real edge time rather
+            than a sample time. Carried for parity with the firmware; the
+            model's estimator does not read it.
+    """
+
     count: int
     last_edge_us: int
     illegal_transitions: int = 0
@@ -71,6 +117,16 @@ class EncoderSnapshot:
 # ------------------------------------------------------------- estimator
 @dataclass
 class VelocityConfig:
+    """Velocity-estimator settings (``odocore::VelocityConfig``).
+
+    Attributes:
+        low_cps: Below this speed (counts/s) only the period (1/T) estimate
+            is used.
+        high_cps: Above this speed (counts/s) only the fixed-period estimate
+            is used; in between the two are blended linearly.
+        zero_timeout_us: No edge for this long (us) means the wheel stopped.
+    """
+
     low_cps: float = 200.0
     high_cps: float = 800.0
     zero_timeout_us: int = 250_000
@@ -146,6 +202,27 @@ class VelocityEstimator:
 # ------------------------------------------------------------------ PID
 @dataclass
 class PidConfig:
+    """Per-wheel velocity-controller gains and limits (``odocore::PidConfig``).
+
+    Control law, with e = target - measured (rad/s)::
+
+        u = kff * target + ks * sign(target) + kp * e + I + kd * d(-measured)/dt
+
+    Attributes:
+        kp: Duty per rad/s of error.
+        ki: Duty per (rad/s * s) of accumulated error.
+        kd: Duty per rad/s^2, on the measurement (0 by default).
+        kff: Feed-forward, duty per rad/s of target.
+        ks: Static-friction feed-forward, duty (applied when |target| > 1e-6).
+        output_limit: |duty| ceiling, 0..1.
+        slew_rate: Maximum duty change per second; 0 disables slew limiting.
+        d_cutoff_hz: Derivative low-pass cut-off, Hz; 0 = unfiltered.
+
+    The integrator is not advanced while the output is clipped (by the limit
+    or the slew limiter) and the error would push it further, and is clamped
+    to +-output_limit.
+    """
+
     kp: float = 0.02
     ki: float = 0.2
     kd: float = 0.0
@@ -219,6 +296,15 @@ class VelocityPid:
 
 # ------------------------------------------------------------- watchdog
 class CommandWatchdog:
+    """Stops the motors when velocity commands stop arriving (``watchdog.h``).
+
+    Starts expired (no command yet) without counting a trip. :meth:`feed`
+    marks a command at ``now_us``; :meth:`update`, called once per control
+    period, returns True while ``now_us - last_feed <= timeout_us`` and
+    otherwise expires, counting one trip in ``trips`` per fresh -> expired
+    transition. Once expired it stays expired until the next :meth:`feed`.
+    """
+
     def __init__(self, timeout_us: int = 500_000) -> None:
         self.timeout_us = timeout_us
         self._last_feed = 0
@@ -242,12 +328,29 @@ class CommandWatchdog:
 # ------------------------------------------------------------- odometry
 @dataclass(frozen=True)
 class Pose2D:
+    """Planar pose in the odometry frame.
+
+    Attributes:
+        x: m.
+        y: m.
+        theta: Heading, rad, counter-clockwise from +x. Not wrapped: it
+            accumulates across turns; use :func:`wrap_angle` for (-pi, pi].
+    """
+
     x: float = 0.0
     y: float = 0.0
     theta: float = 0.0
 
 
 def wrap_angle(angle: float) -> float:
+    """Wrap an angle in rad to the half-open interval (-pi, pi].
+
+    Mirrors ``odocore::wrap_angle``: ``pi`` and ``-pi`` both map to ``pi``,
+    ``3*pi/2`` maps to ``-pi/2``. This is the wrapping applied to ``theta`` in
+    ODOMETRY messages. NaN passes through as NaN. An infinite angle raises
+    :class:`ValueError` (from :func:`math.fmod`), where the C++ version
+    returns NaN.
+    """
     wrapped = math.fmod(angle + math.pi, 2.0 * math.pi)
     if wrapped <= 0.0:
         wrapped += 2.0 * math.pi
@@ -272,6 +375,24 @@ def compose(p: Pose2D, q: Pose2D) -> Pose2D:
 # ----------------------------------------------------- drive controller
 @dataclass
 class DriveConfig:
+    """Controller configuration, mirroring ``odocore::DriveConfig``.
+
+    Attributes:
+        geometry: Drive-base geometry (see :class:`~odobridge.kinematics.Geometry`).
+        ticks_per_wheel_rev: 4x encoder counts per wheel revolution
+            (PPR x 4 x gear ratio); default 2000 x 19 = 38000.
+        max_wheel_speed: Uniform saturation limit, rad/s; a non-positive or
+            infinite value disables saturation.
+        pid: Gains shared by all four wheel controllers.
+        velocity: Estimator settings shared by all four wheels.
+        watchdog_timeout_ms: Command timeout, ms.
+        control_rate_hz: Nominal control rate. :meth:`DriveController.step`
+            does not use it (it takes ``dt`` from the timestamps);
+            :class:`SimulatedFirmware` uses it as its period.
+        telemetry_divider: Used by :class:`SimulatedFirmware` only: send
+            WHEEL_STATE and ODOMETRY every N periods, DIAGNOSTICS every 10 N.
+    """
+
     geometry: Geometry = field(default_factory=Geometry)
     ticks_per_wheel_rev: float = 2000.0 * 19.0
     max_wheel_speed: float = 25.0
@@ -283,11 +404,22 @@ class DriveConfig:
 
     @property
     def radians_per_tick(self) -> float:
+        """Wheel angle per encoder count, rad: ``2 * pi / ticks_per_wheel_rev``."""
         return 2.0 * math.pi / self.ticks_per_wheel_rev
 
 
 @dataclass
 class WheelStatus:
+    """Per-wheel state after the last :meth:`DriveController.step`.
+
+    Attributes:
+        count: Encoder count from the last snapshot (int32).
+        velocity: Measured wheel speed, rad/s.
+        target: Wheel speed target, rad/s (0 while the watchdog is expired).
+        duty: Last duty output, -1..1 (0 while the watchdog is expired).
+        illegal_transitions: From the last snapshot.
+    """
+
     count: int = 0
     velocity: float = 0.0
     target: float = 0.0
@@ -296,7 +428,30 @@ class WheelStatus:
 
 
 class DriveController:
-    """Mirror of ``odocore::DriveController``."""
+    """One control period of the firmware: encoders -> speeds -> PI -> duties.
+
+    Mirror of ``odocore::DriveController``. Drive it with one
+    :meth:`command` per received velocity command and one :meth:`step` per
+    control period.
+
+    The ``config`` object is stored by reference, not copied, and its
+    ``pid`` / ``velocity`` objects are shared by the four wheels. After
+    changing it, call :meth:`apply_config` (required for
+    ``watchdog_timeout_ms`` and for replaced ``pid`` / ``velocity`` objects).
+
+    Public state, read after each step:
+
+    * ``pose`` (:class:`Pose2D`): integrated odometry; ``theta`` unwrapped.
+      May be assigned to reset or set the pose.
+    * ``measured`` (:class:`~odobridge.kinematics.Twist`): body twist from
+      the measured wheel speeds (m/s, m/s, rad/s).
+    * ``active`` (Twist): the command being tracked, after saturation
+      scaling (``vy`` is 0 on a differential drive).
+    * ``scale``: saturation scale of the last command, in (0, 1].
+    * ``targets``: wheel speed targets, rad/s, FL FR RL RR.
+    * ``wheels``: four :class:`WheelStatus`.
+    * ``watchdog`` (:class:`CommandWatchdog`): ``expired`` and ``trips``.
+    """
 
     def __init__(self, config: DriveConfig | None = None) -> None:
         self.config = config or DriveConfig()
@@ -315,6 +470,7 @@ class DriveController:
         self.apply_config()
 
     def apply_config(self) -> None:
+        """Push ``config`` into the estimators, wheel controllers and watchdog."""
         for est in self.estimators:
             est.config = self.config.velocity
         for pid in self.pids:
@@ -322,6 +478,14 @@ class DriveController:
         self.watchdog.timeout_us = self.config.watchdog_timeout_ms * 1000
 
     def command(self, twist: Twist, now_us: int) -> bool:
+        """Accept a body-twist command (m/s, m/s, rad/s) received at ``now_us``.
+
+        Computes the wheel targets with inverse kinematics, scales them
+        uniformly so none exceeds ``max_wheel_speed`` (``scale``), and feeds
+        the watchdog. The new targets are used from the next :meth:`step`.
+        Returns False and changes nothing (the watchdog is not fed) if any
+        component is not finite.
+        """
         if not all(math.isfinite(v) for v in (twist.vx, twist.vy, twist.wz)):
             return False
         wheels, self.scale = saturate(
@@ -344,6 +508,25 @@ class DriveController:
         return [0.0] * 4
 
     def step(self, snapshots: list[EncoderSnapshot], now_us: int) -> list[float]:
+        """Run one control period and return the four duties (FL, FR, RL, RR).
+
+        ``snapshots`` are the four encoders sampled at ``now_us`` (us, 32-bit
+        clock). Duties are signed fractions of full PWM, clamped to
+        +-``abs(pid.output_limit)`` and rate-limited by ``pid.slew_rate`` (so
+        after ``output_limit`` is lowered they can take a few periods to come
+        within the new limit).
+
+        * The first call only primes the estimators and count references and
+          returns ``[0.0] * 4``; the pose is not changed.
+        * Later calls take ``dt`` from the previous call's ``now_us``
+          (wrap-safe), estimate wheel speeds, integrate the pose from the
+          count increments (exact SE(2) arc) and update ``measured``. This
+          happens whether or not the watchdog is fresh.
+        * If the watchdog is expired (no command yet, or none for more than
+          ``watchdog_timeout_ms``), the wheel controllers are reset, targets,
+          ``active`` and duties are zeroed, ``scale`` returns to 1 and
+          ``[0.0] * 4`` is returned. Otherwise each wheel's PI(D) runs.
+        """
         rad_per_tick = self.config.radians_per_tick
         if not self._primed:
             for i, s in enumerate(snapshots):
@@ -387,6 +570,11 @@ class MotorModel:
     Steady-state wheel speed for duty ``u`` is ``sign(u) * (|u| - deadband) /
     duty_per_rad_s`` (zero inside the dead band); the speed approaches it with
     time constant ``tau``. The defaults are made-up round numbers.
+
+    Attributes:
+        duty_per_rad_s: Duty per rad/s of steady-state wheel speed.
+        deadband: Duty magnitude below which the wheel does not turn.
+        tau: Time constant, s.
     """
 
     duty_per_rad_s: float = 0.034
@@ -394,6 +582,7 @@ class MotorModel:
     tau: float = 0.08
 
     def steady_state(self, duty: float) -> float:
+        """Steady-state wheel speed (rad/s) for a constant ``duty``."""
         magnitude = abs(duty) - self.deadband
         if magnitude <= 0.0:
             return 0.0
@@ -404,7 +593,26 @@ class SimulatedRobot:
     """Four motors with ideal encoders, integrated in physics sub-steps.
 
     Encoder edges are timestamped exactly (by interpolation within a
-    sub-step), like the firmware's interrupt decoder.
+    sub-step), like the firmware's interrupt decoder. There is no wheel slip,
+    backlash or encoder noise.
+
+    Args:
+        geometry: Used for the ground-truth pose (``true_pose``).
+        ticks_per_wheel_rev: 4x encoder counts per wheel revolution.
+        motors: Four :class:`MotorModel` in FL, FR, RL, RR order; default
+            ``MotorModel()`` for every wheel.
+        substeps: Physics sub-steps per :meth:`advance` call.
+        start_us: Initial clock value, us (taken modulo 2**32).
+
+    Typical closed loop, one control period ``dt`` per iteration::
+
+        duty = controller.step(robot.snapshots(), robot.now_us)
+        robot.advance(duty, dt)
+
+    State: ``now_us`` (32-bit us clock), ``angle`` (wheel angles, rad),
+    ``speed`` (wheel speeds, rad/s), ``count`` (encoder counts, unwrapped),
+    ``last_edge_us`` and ``true_pose`` (:class:`Pose2D` from the true wheel
+    motion; ``theta`` unwrapped). All per-wheel lists are FL, FR, RL, RR.
     """
 
     def __init__(
@@ -427,12 +635,23 @@ class SimulatedRobot:
         self.true_pose = Pose2D()
 
     def snapshots(self) -> list[EncoderSnapshot]:
+        """The four encoders now: int32 counts, exact edge times, no illegal transitions."""
         return [
             EncoderSnapshot(to_int32(self.count[i]), self.last_edge_us[i], 0, True)
             for i in range(4)
         ]
 
     def advance(self, duty: list[float], dt: float) -> None:
+        """Hold ``duty`` (FL, FR, RL, RR) for ``dt`` seconds.
+
+        Each of ``substeps`` sub-steps moves every wheel speed towards
+        :meth:`MotorModel.steady_state` with the exact first-order response,
+        integrates the wheel angle with the trapezoidal rule, updates the
+        count (``floor(angle / rad_per_tick)``) and the interpolated time of
+        the last edge crossed, and composes the true pose from the mean wheel
+        increments. ``now_us`` then advances by ``round(dt * 1e6)``, modulo
+        2**32.
+        """
         h = dt / self.substeps
         h_us = h * 1e6
         for k in range(self.substeps):
@@ -537,9 +756,24 @@ def set_param(config: DriveConfig, pid_: int, value: float) -> int:
 class SimulatedFirmware:
     """The firmware node + controller + plant, speaking the real wire protocol.
 
-    Bytes written with :meth:`write` are decoded exactly as the firmware
-    would; :meth:`run` advances simulated time in control periods and queues
-    telemetry frames for :meth:`read`.
+    Mirror of ``odocore::FirmwareNode`` driving a :class:`DriveController`
+    and a :class:`SimulatedRobot`. Bytes written with :meth:`write` are
+    decoded exactly as the firmware would; :meth:`step` / :meth:`run` advance
+    simulated time in control periods of ``1 / control_rate_hz`` seconds and
+    queue telemetry frames for :meth:`read`.
+
+    Message handling: VELOCITY_CMD calls :meth:`DriveController.command` at
+    the current time; SET_POSE replaces the pose and answers with an
+    ODOMETRY frame; PARAM_GET / PARAM_SET answer with PARAM_VALUE. A
+    successful PARAM_SET updates the controller's config and the plant's
+    geometry, but the plant keeps the encoder resolution it was built with.
+
+    Attributes:
+        controller: The :class:`DriveController`.
+        robot: The :class:`SimulatedRobot` plant.
+        receiver: :class:`~odobridge.protocol.FrameDecoder` for host bytes
+            (``crc_errors`` and ``frame_errors`` feed DIAGNOSTICS).
+        frames_sent: Number of frames queued so far.
     """
 
     def __init__(
@@ -562,28 +796,34 @@ class SimulatedFirmware:
 
     @property
     def now_us(self) -> int:
+        """Simulated time, us (32-bit clock)."""
         return self.robot.now_us
 
     @property
     def period_s(self) -> float:
+        """Control period, s: ``1 / control_rate_hz``."""
         return 1.0 / self.controller.config.control_rate_hz
 
     # host side of the "serial port"
     def write(self, data: bytes) -> None:
+        """Feed bytes from the host; complete, valid frames are handled at once."""
         for packet in self.receiver.feed(data):
             self.handle(packet.message)
 
     def read(self) -> bytes:
+        """Return and clear all queued outgoing frame bytes."""
         data = bytes(self._out)
         self._out.clear()
         return data
 
     def send(self, message: Message) -> None:
+        """Queue ``message`` as a frame with the next sequence number (mod 256)."""
         self._out += encode_frame(message, self._tx_seq)
         self._tx_seq = (self._tx_seq + 1) & 0xFF
         self.frames_sent += 1
 
     def handle(self, message: Message) -> None:
+        """Act on one decoded host message (see the class docstring)."""
         c = self.controller
         if isinstance(message, VelocityCommand):
             c.command(Twist(message.vx, message.vy, message.wz), self.now_us)
@@ -603,6 +843,7 @@ class SimulatedFirmware:
             self.send(ParamValue(message.id, status, value))
 
     def odometry_message(self) -> Odometry:
+        """ODOMETRY now: pose with ``theta`` wrapped to (-pi, pi], measured twist."""
         c = self.controller
         return Odometry(
             self.now_us,
@@ -615,6 +856,7 @@ class SimulatedFirmware:
         )
 
     def wheel_state_message(self) -> WheelState:
+        """WHEEL_STATE now: counts, speeds, targets, duties via ``duty_to_wire``."""
         w = self.controller.wheels
         return WheelState(
             self.now_us,
@@ -630,6 +872,7 @@ class SimulatedFirmware:
         )
 
     def diagnostics_message(self) -> Diagnostics:
+        """DIAGNOSTICS now: watchdog / saturation flags, trips, receive errors."""
         c = self.controller
         flags = 0
         if c.watchdog.expired:
@@ -649,7 +892,16 @@ class SimulatedFirmware:
         )
 
     def step(self) -> None:
-        """One control period: sample, control, telemetry, then plant."""
+        """One control period: sample, control, telemetry, then plant.
+
+        Samples the encoders at :attr:`now_us`, runs
+        :meth:`DriveController.step`, queues WHEEL_STATE and ODOMETRY on every
+        ``telemetry_divider``-th period and DIAGNOSTICS on every
+        ``10 * telemetry_divider``-th (both on the first period; a divider
+        below 1 counts as 1), then holds the new duties on the plant for
+        :attr:`period_s`. Telemetry therefore reports the state before the
+        plant moves.
+        """
         c = self.controller
         self._duty = c.step(self.robot.snapshots(), self.now_us)
         divider = max(1, c.config.telemetry_divider)
@@ -662,6 +914,6 @@ class SimulatedFirmware:
         self.robot.advance(self._duty, self.period_s)
 
     def run(self, seconds: float) -> None:
-        """Advance simulated time by whole control periods."""
+        """Call :meth:`step` ``round(seconds / period_s)`` times (none if negative)."""
         for _ in range(max(0, round(seconds / self.period_s))):
             self.step()
