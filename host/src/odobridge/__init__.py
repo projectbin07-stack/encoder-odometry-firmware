@@ -9,7 +9,7 @@ from .firmware_model import DriveConfig, DriveController, SimulatedRobot, wrap_a
 from .kinematics import Geometry, Twist
 from .protocol import duty_to_wire
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "DriveConfig",
